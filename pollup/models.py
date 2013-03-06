@@ -29,7 +29,6 @@ MyModel.polls.all()
 MyModel.polls.won()
 MyModel.polls.lost()
 
-
 customize the PollModel:
 
 class MyModel(models.Model):
@@ -39,6 +38,7 @@ class MyModel(models.Model):
 How to vote?
 
 PollInstance.vote(voter="",choice="")
+MyModel.polls.vote(poll=PollInstance,voter="")
 
 """
 class PollBase(models.Model):
@@ -53,8 +53,28 @@ class PollBase(models.Model):
     def __unicode__(self):
         return self.title
 
-    def vote(self,voter,choice):
+    def vote(self,voter,choice_object):
         pass
+
+    @classmethod
+    def choice_field_names(cls):
+        choice_field_names = []
+        for rel in cls._meta.get_all_related_objects():
+            if issubclass(rel.field.model,ChoiceBase) and type(rel.field)==models.ForeignKey:
+                choice_field_names.append(rel.get_accessor_name())
+        return choice_field_names
+
+    def choices(self):
+        choices = []
+        for field_name in self.__class__.choice_field_names():
+            choices += list(getattr(self,field_name).all())
+        return choices
+
+    def choice_objects(self):
+        choice_objects = []
+        for field_name in self.__class__.choice_field_names():
+            choice_objects += [ choice.content_object for choice in getattr(self,field_name).all() ]
+        return choice_objects
 
     @property
     def winner(self):
@@ -99,6 +119,22 @@ class VoteBase(models.Model):
     class Meta:
         abstract = True
 
+    @classmethod
+    def poll_model(cls):
+        return cls._meta.get_field_by_name("poll")[0].rel.to
+
+    @classmethod
+    def poll_relname(cls):
+        return cls._meta.get_field_by_name('poll')[0].rel.related_name
+
+    @classmethod
+    def choice_model(cls):
+        return cls._meta.get_field_by_name("choice")[0].rel.to
+
+    @classmethod
+    def choice_relname(cls):
+        return cls._meta.get_field_by_name('choice')[0].rel.related_name
+
 class ChoiceMetaClass(models.base.ModelBase):
     def __new__(cls, name, bases, attrs):
         new = super(ChoiceMetaClass, cls).__new__(cls, name, bases, attrs)
@@ -116,6 +152,7 @@ class ChoiceMetaClass(models.base.ModelBase):
 
             VoteClass = type(vote_class_name, (VoteBase,), attrs)
             setattr(sys.modules[new.__module__],vote_class_name,VoteClass)
+
         return new
 
 class ChoiceBase(models.Model):
