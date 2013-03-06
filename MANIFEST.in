@@ -1,0 +1,11 @@
+recursive-include doc_src *
+recursive-include docs *
+
+recursive-include pollup/static *
+recursive-include pollup/templates *
+
+include LICENSE
+include README
+include *.txt
+
+prune example/
