@@ -37,11 +37,37 @@ class MyModel(models.Model):
 
 How to vote?
 
-PollInstance.vote(voter="",choice="")
-MyModel.polls.vote(poll=PollInstance,voter="")
+
 
 """
+
+class PollMetaClass(models.base.ModelBase):
+    def __new__(cls, name, bases, attrs):
+        bases_votebases = []
+        if 'VoteBase' in attrs:
+            bases_votebases.append(attrs.pop('VoteBase'))
+            print "Custom: " + name
+        else:
+            print "Inheriting: " + name
+            for base in bases:
+                if hasattr(base,'VoteBase'):
+                    bases_votebases.append(base.VoteBase)
+
+        new = super(PollMetaClass, cls).__new__(cls, name, bases, attrs)
+
+        vote_base_name = '%sVoteBase' % name
+        class VoteBaseClassInnerMeta:
+            # Using type('Meta', ...) gives a dictproxy error during model creation
+            abstract = True
+        setattr(VoteBaseClassInnerMeta, 'app_label', new._meta.app_label)
+        votebase_attrs = {'__module__':new.__module__,'Meta': VoteBaseClassInnerMeta}
+        new_votebase = type(vote_base_name,tuple(bases_votebases),votebase_attrs)
+        setattr(new,'VoteBase', new_votebase)
+
+        return new
+
 class PollBase(models.Model):
+    __metaclass__ = PollMetaClass
 
     title = models.CharField(max_length=255,blank=True)
     slug = models.SlugField(verbose_name=_('Slug'), unique=True, max_length=100)
@@ -57,24 +83,59 @@ class PollBase(models.Model):
         pass
 
     @classmethod
-    def choice_field_names(cls):
-        choice_field_names = []
+    def _populate_poll_reverse_helpers(cls):
+        cls._meta.poll_reverse_field_names = {'choices': [], 'votes': []}
+        cls._meta.poll_reverse_models = {'choices': [], 'votes': []}
         for rel in cls._meta.get_all_related_objects():
-            if issubclass(rel.field.model,ChoiceBase) and type(rel.field)==models.ForeignKey:
-                choice_field_names.append(rel.get_accessor_name())
-        return choice_field_names
+            if type(rel.field)==models.ForeignKey:
+                if issubclass(rel.field.model,ChoiceBase):
+                    key = 'choices'
+                elif issubclass(rel.field.model,cls.VoteBase):
+                    key = 'votes'
+                else:
+                    key = None
+
+                if key is not None:
+                    cls._meta.poll_reverse_field_names[key].append(rel.get_accessor_name())
+                    cls._meta.poll_reverse_models[key].append(rel.field.model)
+
+    @classmethod
+    def _check_poll_reverse_helpers(cls):
+        if hasattr(cls._meta,'poll_reverse_field_names') and hasattr(cls._meta,'poll_reverse_models'):
+            return
+        else:
+            cls._populate_poll_reverse_helpers()
+
+    @classmethod
+    def choices_models(cls):
+        cls._check_poll_reverse_helpers()
+        return cls._meta.poll_reverse_models['choices']
+
+    @classmethod
+    def votes_models(cls):
+        cls._check_poll_reverse_helpers()
+        return cls._meta.poll_reverse_models['votes']
 
     def choices(self):
+        self._check_poll_reverse_helpers()
         choices = []
-        for field_name in self.__class__.choice_field_names():
+        for field_name in self._meta.poll_reverse_field_names['choices']:
             choices += list(getattr(self,field_name).all())
         return choices
 
-    def choice_objects(self):
-        choice_objects = []
-        for field_name in self.__class__.choice_field_names():
-            choice_objects += [ choice.content_object for choice in getattr(self,field_name).all() ]
-        return choice_objects
+    def choices_objects(self):
+        self._check_poll_reverse_helpers()
+        choices_objects = []
+        for field_name in self._meta.poll_reverse_field_names['choices']:
+            choices_objects += [ choice.content_object for choice in getattr(self,field_name).all() ]
+        return choices_objects
+
+    def votes(self):
+        self._check_poll_reverse_helpers()
+        votes = []
+        for field_name in self._meta.poll_reverse_field_names['votes']:
+            votes += list(getattr(self,field_name).all())
+        return votes
 
     @property
     def winner(self):
@@ -85,6 +146,31 @@ class PollBase(models.Model):
     def loser(self):
         # return last place choice
         return
+
+    class VoteBase(models.Model):
+        time_stamp = models.DateTimeField(auto_now_add=True)
+
+        class Meta:
+            abstract = True
+
+        def __unicode__(self):
+            return u"Vote for choice: %(choice)s" % {'choice': self.choice}
+
+        @classmethod
+        def poll_model(cls):
+            return cls._meta.get_field_by_name("poll")[0].rel.to
+
+        @classmethod
+        def poll_relname(cls):
+            return cls._meta.get_field_by_name('poll')[0].rel.related_name
+
+        @classmethod
+        def choice_model(cls):
+            return cls._meta.get_field_by_name("choice")[0].rel.to
+
+        @classmethod
+        def choice_relname(cls):
+            return cls._meta.get_field_by_name('choice')[0].rel.related_name
 
 class ScheduledPollMixin(models.Model):
     voting_opens_on = models.DateTimeField(default=datetime.now(), null=True, blank=True)
@@ -101,39 +187,26 @@ class OneVotePerUserMixin(models.Model):
     class Meta:
         abstract = True
 
+    class VoteBase(models.Model):
+        voter_ip = models.IPAddressField(blank=True,default='')
+        if django.VERSION < (1, 2):
+            voter = models.ForeignKey(UserModel,related_name="%(class)s_votes", blank=True,null=True)
+        else:
+            voter = models.ForeignKey(UserModel,related_name="%(app_label)s_%(class)s_votes",blank=True,null=True)
+        
+        class Meta:
+            abstract = True
+
+        def validate_unique(self,*args,**kwargs):
+            print "HELLO!"
+            super(OneVotePerUserMixin.VoteBase,self).validate_unique(*args,**kwargs)
+
+
 
 class Poll(PollBase,ScheduledPollMixin,OneVotePerUserMixin):    
     class Meta:
         verbose_name = _("Poll")
         verbose_name_plural = _("Polls")
-
-class VoteBase(models.Model):
-    voter_ip = models.IPAddressField(blank=True)
-    if django.VERSION < (1, 2):
-        voter = models.ForeignKey(UserModel,related_name="%(class)s_votes", blank=True,null=True)
-    else:
-        voter = models.ForeignKey(UserModel,related_name="%(app_label)s_%(class)s_votes",blank=True,null=True)
-        
-    time_stamp = models.DateTimeField(auto_now_add=True)
-
-    class Meta:
-        abstract = True
-
-    @classmethod
-    def poll_model(cls):
-        return cls._meta.get_field_by_name("poll")[0].rel.to
-
-    @classmethod
-    def poll_relname(cls):
-        return cls._meta.get_field_by_name('poll')[0].rel.related_name
-
-    @classmethod
-    def choice_model(cls):
-        return cls._meta.get_field_by_name("choice")[0].rel.to
-
-    @classmethod
-    def choice_relname(cls):
-        return cls._meta.get_field_by_name('choice')[0].rel.related_name
 
 class ChoiceMetaClass(models.base.ModelBase):
     def __new__(cls, name, bases, attrs):
@@ -147,10 +220,13 @@ class ChoiceMetaClass(models.base.ModelBase):
             setattr(VoteClassInnerMeta, 'app_label', new._meta.app_label)
 
             attrs = {'__module__': new.__module__, 'Meta': VoteClassInnerMeta}
-            attrs['poll'] = models.ForeignKey(new.poll_model())
-            attrs['choice'] = models.ForeignKey(new)
+            if django.VERSION < (1, 2):
+                attrs['poll'] = models.ForeignKey(new.poll_model(),related_name="%(class)s_votes")
+            else:
+                attrs['poll'] = models.ForeignKey(new.poll_model(),related_name="%(app_label)s_%(class)s_votes")
+            attrs['choice'] = models.ForeignKey(new,related_name="votes") # only one vote class / choice class
 
-            VoteClass = type(vote_class_name, (VoteBase,), attrs)
+            VoteClass = type(vote_class_name, (new.poll_model().VoteBase,), attrs)
             setattr(sys.modules[new.__module__],vote_class_name,VoteClass)
 
         return new
@@ -159,7 +235,7 @@ class ChoiceBase(models.Model):
     __metaclass__ = ChoiceMetaClass
 
     def __unicode__(self):
-        return ugettext("%(choice)s choice for %(poll)s") % {
+        return ugettext("%(choice)s in poll: %(poll)s") % {
             "choice": self.content_object,
             "poll": self.poll
         }
