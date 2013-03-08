@@ -2,6 +2,7 @@
 # -*- coding: utf-8 -*-
 import django
 from django.db import models
+from django.core.exceptions import ValidationError
 from django.conf import settings as site_settings
 from django.utils.translation import ugettext, ugettext_lazy as _
 
@@ -45,10 +46,10 @@ class PollMetaClass(models.base.ModelBase):
     def __new__(cls, name, bases, attrs):
         bases_votebases = []
         if 'VoteBase' in attrs:
+            #custom VoteBase class
             bases_votebases.append(attrs.pop('VoteBase'))
-            print "Custom: " + name
         else:
-            print "Inheriting: " + name
+            #inherit VoteBase class from Poll parents
             for base in bases:
                 if hasattr(base,'VoteBase'):
                     bases_votebases.append(base.VoteBase)
@@ -72,6 +73,7 @@ class PollBase(models.Model):
     title = models.CharField(max_length=255,blank=True)
     slug = models.SlugField(verbose_name=_('Slug'), unique=True, max_length=100)
     description_or_question = models.TextField(blank=True)
+    require_auth = models.BooleanField(default=False,)
 
     class Meta:
         abstract = True
@@ -180,8 +182,8 @@ class ScheduledPollMixin(models.Model):
         abstract = True
 
 class OneVotePerUserMixin(models.Model):
-    log_vote_by_ip = models.BooleanField(default=False,)
-    log_vote_by_user = models.BooleanField(default=False,)
+    one_vote_per_ip = models.BooleanField(default=True,)
+    one_vote_per_user = models.BooleanField(default=True,)
     # if both IP and user, only one vote per user and one vote per ANON IP
 
     class Meta:
@@ -198,10 +200,24 @@ class OneVotePerUserMixin(models.Model):
             abstract = True
 
         def validate_unique(self,*args,**kwargs):
-            print "HELLO!"
+            lookup_kwargs = {'poll': self.poll,}
+            do_check = False
+
+            if self.poll.one_vote_per_user and self.voter is not None:
+                lookup_kwargs['voter']=self.voter
+                do_check |= True
+            elif self.poll.one_vote_per_ip:
+                lookup_kwargs['voter_ip']=self.voter_ip
+                do_check |= True
+
+            if do_check:
+                qs = self._default_manager.filter(**lookup_kwargs)
+                if not self._state.adding and self.pk is not None:
+                    qs.exclude(pk=self.pk)
+                if qs.exists():
+                    raise ValidationError(_(u"%s with this Voter or Voter IP already exist" % self.__name__))
+
             super(OneVotePerUserMixin.VoteBase,self).validate_unique(*args,**kwargs)
-
-
 
 class Poll(PollBase,ScheduledPollMixin,OneVotePerUserMixin):    
     class Meta:
